@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU queue</title>
+<meta name="description" content="Live status of the team's H200 GPU nodes and job queue.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="../favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Status data comes from the `status` branch of STATUS_REPO, written by
+   `gitm-job _push-status` on the cluster's control VM. */
+:root {
+  --paper: #eef1f4;
+  --panel: #f9fafb;
+  --ink: #1c2733;
+  --steel: #5b6b7c;
+  --rule: #cdd5dd;
+  --cell: #e2e7ec;
+  --load: #0f6e74;
+  --load-soft: #cfe5e6;
+  --wait: #a8661a;
+  --wait-soft: #f4e6d2;
+  --bad: #b3261e;
+  --bad-soft: #f6dcda;
+  --good: #2f7a3e;
+  --log-bg: #1f2b38;
+  --log-ink: #d6dee6;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #16202b; --panel: #1d2935; --ink: #e4eaf0; --steel: #93a3b3;
+    --rule: #2f3e4d; --cell: #263443; --load: #3fb3ae; --load-soft: #1f4547;
+    --wait: #e0a050; --wait-soft: #3d3122; --bad: #f08a80; --bad-soft: #43282a;
+    --good: #6cc382; --log-bg: #101820; --log-ink: #c9d3dd; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #16202b; --panel: #1d2935; --ink: #e4eaf0; --steel: #93a3b3;
+  --rule: #2f3e4d; --cell: #263443; --load: #3fb3ae; --load-soft: #1f4547;
+  --wait: #e0a050; --wait-soft: #3d3122; --bad: #f08a80; --bad-soft: #43282a;
+  --good: #6cc382; --log-bg: #101820; --log-ink: #c9d3dd; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 16px/1.5 "Archivo", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--load); outline-offset: 2px; border-radius: 2px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; margin-bottom: 28px; }
+h1 { font-size: 2.6rem; line-height: 1; margin: 0; font-weight: 800; font-stretch: 125%; letter-spacing: -0.02em; }
+.sync { color: var(--steel); font-size: .9rem; display: flex; align-items: center; gap: 8px; }
+.sync .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+.sync.stale .dot { background: var(--wait); }
+.sync.down .dot { background: var(--bad); }
+.banner { border-left: 3px solid var(--wait); background: var(--wait-soft); padding: 10px 14px; margin: -12px 0 24px; font-size: .95rem; }
+.banner.bad { border-color: var(--bad); background: var(--bad-soft); }
+
+h2 { font-size: 1.15rem; font-weight: 700; font-stretch: 100%; margin: 44px 0 12px; display: flex; gap: 10px; align-items: baseline; }
+h2 .count { color: var(--steel); font-weight: 500; }
+
+/* --- the trays: one per GPU node --- */
+.trays { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr)); gap: 20px; }
+.tray { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 18px 14px; min-width: 0; }
+.tray-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.node { font-size: 1.5rem; font-weight: 750; font-stretch: 112%; margin: 0; letter-spacing: -0.01em; }
+.node-state { font-size: .85rem; color: var(--steel); white-space: nowrap; }
+.node-state.bad { color: var(--bad); font-weight: 600; }
+.occupant { margin: 10px 0 14px; min-height: 3.2em; }
+.occupant .who { font-size: 1.05rem; font-weight: 650; overflow-wrap: anywhere; }
+.occupant .meta .owner { color: var(--load); font-weight: 600; }
+.occupant .meta { color: var(--steel); font-size: .88rem; overflow-wrap: anywhere; }
+.occupant.idle .who { color: var(--steel); font-weight: 500; }
+.occupant .detail { color: var(--wait); font-size: .88rem; }
+
+.runbar { height: 4px; background: var(--cell); border-radius: 2px; margin: 8px 0 2px; overflow: hidden; }
+.runbar > i { display: block; height: 100%; background: var(--load); }
+.runbar.late > i { background: var(--wait); }
+
+.gpus { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+.gpu { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; }
+.cell { position: relative; height: 92px; background: var(--cell); border-radius: 4px; overflow: hidden; }
+.cell .fill { position: absolute; left: 0; right: 0; bottom: 0; background: var(--load); transition: height .8s cubic-bezier(.2,.7,.2,1); }
+.memb { height: 4px; background: var(--cell); border-radius: 2px; overflow: hidden; }
+.memb > i { display: block; height: 100%; background: var(--wait); }
+.cell .pct { position: absolute; left: 0; right: 0; top: 6px; text-align: center; font-size: .78rem; font-weight: 650; color: var(--ink); }
+.cell.hot .pct { color: var(--panel); }
+.gpu .lbl { font-size: .72rem; color: var(--steel); text-align: center; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legend { font-size: .78rem; color: var(--steel); margin-top: 8px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: -1px; margin: 0 4px 0 0; }
+.nogpu { color: var(--steel); font-size: .88rem; padding: 18px 0; }
+
+details.log { margin-top: 12px; }
+details.log summary { cursor: pointer; font-size: .88rem; color: var(--steel); }
+details.log summary:hover { color: var(--ink); }
+pre { margin: 8px 0 0; background: var(--log-bg); color: var(--log-ink); border-radius: 6px; padding: 10px 12px;
+      font: 400 .76rem/1.5 "IBM Plex Mono", ui-monospace, monospace; overflow-x: auto; white-space: pre; max-height: 320px; overflow-y: auto; }
+
+/* --- queue: a real order, so positions are numbered --- */
+ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.queue li { display: grid; grid-template-columns: 3rem minmax(0, 1fr) auto; gap: 4px 16px; align-items: baseline; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.queue .pos { font-size: 1.6rem; font-weight: 800; font-stretch: 125%; color: var(--wait); line-height: 1; }
+.queue .what { font-weight: 600; overflow-wrap: anywhere; }
+.queue .meta .owner { color: var(--wait); font-weight: 600; }
+.queue .meta { color: var(--steel); font-size: .88rem; grid-column: 2; overflow-wrap: anywhere; }
+.queue .wait { color: var(--steel); font-size: .9rem; white-space: nowrap; grid-row: 1; grid-column: 3; }
+.empty { color: var(--steel); padding: 14px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+
+/* --- recent --- */
+.recent { width: 100%; border-collapse: collapse; font-size: .92rem; }
+.recent th { text-align: left; font-weight: 600; color: var(--steel); font-size: .82rem; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--rule); }
+.recent td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.recent td.name { overflow-wrap: anywhere; }
+.st { font-weight: 600; white-space: nowrap; }
+.st.succeeded { color: var(--good); }
+.st.failed { color: var(--bad); }
+.recent .why { color: var(--steel); font-size: .85rem; }
+.recent tr.expand td { padding-top: 0; }
+.recent button.more { font: inherit; font-size: .82rem; color: var(--steel); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+@media (max-width: 640px) {
+  h1 { font-size: 2.1rem; }
+  .cell { height: 72px; }
+  .recent .c-model, .recent .c-node { display: none; }
+}
+
+.howto { margin-top: 48px; color: var(--steel); font-size: .92rem; max-width: 72ch; }
+.howto code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .85em; background: var(--cell); padding: 1px 5px; border-radius: 3px; color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) { .cell .fill { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>GPU queue</h1>
+    <div class="sync" id="sync" role="status" aria-live="polite"><span class="dot"></span><span id="sync-text">Loading…</span></div>
+  </header>
+  <div id="banner"></div>
+
+  <section aria-labelledby="h-nodes">
+    <h2 id="h-nodes" class="visually-hidden" style="margin-top:0">Nodes</h2>
+    <div class="trays" id="trays"></div>
+  </section>
+
+  <section aria-labelledby="h-queue">
+    <h2 id="h-queue">Waiting <span class="count" id="queue-count"></span></h2>
+    <div id="queue"></div>
+  </section>
+
+  <section aria-labelledby="h-recent">
+    <h2 id="h-recent">Finished recently</h2>
+    <div id="recent"></div>
+  </section>
+
+  <p class="howto">
+    Each job gets all 8 GPUs of one node and starts on whichever node frees up first.
+    To queue one, SSH to the control VM and run
+    <code>gitm-job submit --name my-run --model org/model</code>.
+    Check your place with <code>gitm-job ls</code>.
+  </p>
+</div>
+
+<script>
+"use strict";
+const STATUS_REPO = "aditchawdhary/gpu-status";   // written by gitm-job _push-status
+const BRANCH = "status";
+const POLL_MS = 60_000;          // GitHub allows 60 unauthenticated API calls/hour; unchanged polls are free
+const STALE_AFTER_S = 10 * 60;   // the pusher heartbeats every 5 min
+
+const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
+let data = null, lastSha = null, source = "", fetchError = null;
+const openLogs = new Set();
+
+// ---------- fetching ----------
+async function fetchStatus() {
+  if (params.has("src")) {               // local testing: ?src=status.json
+    return { json: await (await fetch(params.get("src"), { cache: "no-store" })).json(), via: "file" };
+  }
+  try {
+    // Ref lookup through the API: cache "no-cache" makes the browser send
+    // If-None-Match, and GitHub does not count 304 replies against the limit.
+    const r = await fetch(`https://api.github.com/repos/${STATUS_REPO}/git/ref/heads/${BRANCH}`,
+                          { cache: "no-cache", headers: { Accept: "application/vnd.github+json" } });
+    if (r.ok) {
+      const sha = (await r.json()).object.sha;
+      if (sha === lastSha && data) return { json: data, via: "live" };
+      // By commit sha the file is immutable, so the CDN can't serve a stale copy.
+      const f = await fetch(`https://raw.githubusercontent.com/${STATUS_REPO}/${sha}/status.json`);
+      if (!f.ok) throw new Error(`status.json: HTTP ${f.status}`);
+      lastSha = sha;
+      return { json: await f.json(), via: "live" };
+    }
+    if (r.status === 404) throw new Error("not-found");
+    // 403/429 = this network used up its hourly API calls; fall through.
+  } catch (e) {
+    if (e.message === "not-found") throw e;
+  }
+  // Fallback: branch URL on the raw CDN, which can lag up to ~5 minutes.
+  const f = await fetch(`https://raw.githubusercontent.com/${STATUS_REPO}/${BRANCH}/status.json`);
+  if (f.status === 404) throw new Error("not-found");
+  if (!f.ok) throw new Error(`HTTP ${f.status}`);
+  return { json: await f.json(), via: "cdn" };
+}
+
+async function refresh() {
+  try {
+    const { json, via } = await fetchStatus();
+    data = json; source = via; fetchError = null;
+  } catch (e) {
+    fetchError = e.message === "not-found"
+      ? "No status published yet. The status pusher on the control VM hasn't pushed to GitHub."
+      : "Couldn't reach GitHub to load the status. Retrying every minute.";
+  }
+  render();
+}
+
+// ---------- formatting ----------
+const ts = (s) => (s ? Date.parse(s) : null);
+function dur(sec) {
+  if (sec == null || !isFinite(sec)) return "–";
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (h < 1) return `${m}m`;
+  if (d < 1) return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+  return `${d}d ${h % 24}h`;
+}
+const ago = (s) => dur((Date.now() - ts(s)) / 1000);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const gib = (mib) => (mib == null ? "–" : `${Math.round(mib / 1024)}`);
+
+// ---------- rendering ----------
+function render() {
+  renderSync();
+  if (!data) {
+    $("trays").innerHTML = `<p class="nogpu">${esc(fetchError || "Loading…")}</p>`;
+    return;
+  }
+  const jobs = new Map(data.running.map((j) => [j.name, j]));
+  $("trays").innerHTML = data.nodes.length
+    ? data.nodes.map((n) => tray(n, jobs.get(n.job))).join("")
+    : `<p class="nogpu">No GPU nodes have joined the cluster yet.</p>`;
+  // keep open logs open across refreshes
+  document.querySelectorAll("details.log").forEach((d) => {
+    if (openLogs.has(d.dataset.job)) d.open = true;
+    d.addEventListener("toggle", () => (d.open ? openLogs.add(d.dataset.job) : openLogs.delete(d.dataset.job)));
+  });
+
+  const q = data.queued;
+  $("queue-count").textContent = q.length ? `${q.length} job${q.length > 1 ? "s" : ""}` : "";
+  $("queue").innerHTML = q.length
+    ? `<ol class="queue">${q.map(queueRow).join("")}</ol>`
+    : `<p class="empty">Nobody is waiting.${freeNodes() ? " A node is free: a new job starts right away." : ""}</p>`;
+
+  $("recent").innerHTML = data.recent.length
+    ? `<table class="recent"><thead><tr><th>Job</th><th>Result</th><th class="c-model">Model</th><th class="c-node">Node</th><th>Ran</th><th>Ended</th></tr></thead>
+       <tbody>${data.recent.map(recentRow).join("")}</tbody></table>`
+    : `<p class="empty">No finished jobs in the last 7 days.</p>`;
+  document.querySelectorAll("button.more").forEach((b) =>
+    b.addEventListener("click", () => {
+      const row = document.getElementById(b.getAttribute("aria-controls"));
+      const open = row.hidden; row.hidden = !open; b.setAttribute("aria-expanded", String(open));
+      b.textContent = open ? "Hide output" : "Show output";
+    }));
+}
+
+function freeNodes() {
+  return data.nodes.filter((n) => n.ready && !n.job).length;
+}
+
+function tray(n, job) {
+  let state = n.ready ? (n.schedulable ? (job ? "In use" : "Free") : "Draining") : "Offline";
+  const bad = !n.ready;
+  let occ;
+  if (job) {
+    const started = ts(job.started), max = job.max_runtime_s;
+    const elapsed = started ? (Date.now() - started) / 1000 : null;
+    const frac = elapsed && max ? Math.min(1, elapsed / max) : 0;
+    occ = `<div class="occupant">
+      <div class="who">${esc(job.display_name)}</div>
+      <div class="meta"><span class="owner">${esc(job.owner)}</span>&ensp;${esc(job.model || job.image)}</div>
+      ${job.state === "starting"
+        ? `<div class="detail">Starting: ${esc(job.detail || "creating container")}</div>`
+        : `<div class="runbar${frac > 0.85 ? " late" : ""}" aria-hidden="true"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
+           <div class="meta"><span data-elapsed="${esc(job.started)}">${dur(elapsed)}</span> of ${dur(max)} limit</div>`}
+    </div>`;
+  } else {
+    occ = `<div class="occupant idle"><div class="who">${n.ready ? "No job running" : "Node is not reporting to the cluster"}</div></div>`;
+  }
+  const gpus = n.gpus && n.gpus.length
+    ? `<div class="gpus" role="list" aria-label="GPU utilization">${n.gpus.map(gpuCell).join("")}</div>
+       <div class="legend"><i style="background:var(--load)"></i>compute use&emsp;<i style="background:var(--wait)"></i>memory in use (GiB below)</div>`
+    : `<p class="nogpu">GPU readings unavailable.</p>`;
+  const log = job && job.log_tail && job.log_tail.length
+    ? `<details class="log" data-job="${esc(job.name)}"><summary>Latest output</summary><pre>${esc(job.log_tail.join("\n"))}</pre></details>`
+    : "";
+  return `<article class="tray" aria-label="${esc(n.name)}">
+    <div class="tray-head"><h3 class="node">${esc(n.name)}</h3><span class="node-state${bad ? " bad" : ""}">${state}</span></div>
+    ${occ}${gpus}${log}</article>`;
+}
+
+function gpuCell(g) {
+  const u = g.util ?? 0;
+  const mem = g.mem_total_mib ? (g.mem_used_mib / g.mem_total_mib) * 100 : 0;
+  return `<div class="gpu" role="listitem" aria-label="GPU ${g.index}: ${Math.round(u)}% busy, ${gib(g.mem_used_mib)} of ${gib(g.mem_total_mib)} GiB">
+    <div class="cell${u >= 70 ? " hot" : ""}">
+      <div class="fill" style="height:${u}%"></div>
+      <div class="pct">${Math.round(u)}%</div>
+    </div>
+    <div class="memb" aria-hidden="true"><i style="width:${mem.toFixed(1)}%"></i></div>
+    <div class="lbl" title="${g.power_w ?? "–"} W, ${g.temp_c ?? "–"} °C">${gib(g.mem_used_mib)}G</div>
+  </div>`;
+}
+
+function queueRow(j) {
+  return `<li>
+    <span class="pos" aria-label="Position ${j.position}">${j.position}</span>
+    <span class="what">${esc(j.display_name)}</span>
+    <span class="wait">waiting <span data-since="${esc(j.submitted)}">${ago(j.submitted)}</span></span>
+    <span class="meta"><span class="owner">${esc(j.owner)}</span>&ensp;${esc(j.model)}</span>
+  </li>`;
+}
+
+function recentRow(j, i) {
+  const ran = ts(j.started) && ts(j.finished) ? (ts(j.finished) - ts(j.started)) / 1000 : null;
+  const label = j.state === "succeeded" ? "Done" : "Failed";
+  const id = `out-${i}`;
+  const more = j.log_tail && j.log_tail.length
+    ? `<div><button class="more" aria-expanded="false" aria-controls="${id}">Show output</button></div>` : "";
+  return `<tr>
+      <td class="name">${esc(j.display_name)}<div class="why">${esc(j.owner)}</div></td>
+      <td><span class="st ${j.state}">${label}</span>${j.detail ? `<div class="why">${esc(j.detail)}</div>` : ""}${more}</td>
+      <td class="c-model">${esc(j.model)}</td>
+      <td class="c-node">${esc(j.node || "–")}</td>
+      <td>${dur(ran)}</td>
+      <td>${ago(j.finished)} ago</td>
+    </tr>${more ? `<tr class="expand" id="${id}" hidden><td colspan="6"><pre>${esc(j.log_tail.join("\n"))}</pre></td></tr>` : ""}`;
+}
+
+function renderSync() {
+  const el = $("sync"), txt = $("sync-text"), banner = $("banner");
+  el.className = "sync"; banner.innerHTML = "";
+  if (!data) {
+    if (fetchError) { el.classList.add("down"); txt.textContent = "No data"; }
+    return;
+  }
+  const age = (Date.now() - ts(data.updated)) / 1000;
+  txt.textContent = `Updated ${dur(age)} ago${source === "cdn" ? " (delayed copy)" : ""}`;
+  if (age > STALE_AFTER_S) {
+    el.classList.add("down");
+    banner.innerHTML = `<div class="banner bad">The cluster hasn't reported since ${esc(new Date(ts(data.updated)).toLocaleString())}. What you see may be out of date: check <code>systemctl status gitm-status</code> on the control VM.</div>`;
+  } else if (source === "cdn" || fetchError) {
+    el.classList.add("stale");
+    if (source === "cdn") banner.innerHTML = `<div class="banner">Your network has used up GitHub's hourly allowance, so this page is reading a copy that can lag by a few minutes. It switches back on its own.</div>`;
+  }
+}
+
+// tick the clocks every second without refetching
+setInterval(() => {
+  if (!data) return;
+  document.querySelectorAll("[data-elapsed]").forEach((e) => (e.textContent = ago(e.dataset.elapsed)));
+  document.querySelectorAll("[data-since]").forEach((e) => (e.textContent = ago(e.dataset.since)));
+  renderSync();
+}, 1000);
+
+// poll while visible; refresh immediately when the tab comes back
+let timer = null;
+function schedule() { clearInterval(timer); timer = setInterval(() => !document.hidden && refresh(), POLL_MS); }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { refresh(); schedule(); } });
+refresh(); schedule();
+</script>
+<style>.visually-hidden{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}</style>
+</body>
+</html>
