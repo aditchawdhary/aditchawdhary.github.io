@@ -64,6 +64,18 @@ h1 { font-size: 2.6rem; line-height: 1; margin: 0; font-weight: 800; font-stretc
 .sync.down .dot { background: var(--bad); }
 .banner { border-left: 3px solid var(--wait); background: var(--wait-soft); padding: 10px 14px; margin: -12px 0 24px; font-size: .95rem; }
 .banner.bad { border-color: var(--bad); background: var(--bad-soft); }
+.lock { max-width: 380px; margin: 48px 0 24px; }
+.lock p { color: var(--steel); margin: 0 0 16px; }
+.lock label.field { display: block; font-weight: 600; margin-bottom: 6px; }
+.lock input[type=password] { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--rule);
+  border-radius: 6px; background: var(--panel); color: var(--ink); }
+.lock .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.lock .remember { font-size: .9rem; color: var(--steel); display: flex; gap: 6px; align-items: center; }
+.lock button, .sync button { font: inherit; cursor: pointer; }
+.lock button { background: var(--load); color: var(--panel); border: 0; border-radius: 6px; padding: 9px 18px; font-weight: 600; }
+.lock button[disabled] { opacity: .6; cursor: progress; }
+.lock .err { color: var(--bad); font-size: .9rem; margin: 10px 0 0; min-height: 1.4em; }
+.sync button { background: none; border: 0; color: var(--steel); text-decoration: underline; padding: 0 0 0 6px; font-size: .9rem; }
 
 h2 { font-size: 1.15rem; font-weight: 700; font-stretch: 100%; margin: 44px 0 12px; display: flex; gap: 10px; align-items: baseline; }
 h2 .count { color: var(--steel); font-weight: 500; }
@@ -147,6 +159,18 @@ ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--
   </header>
   <div id="banner"></div>
 
+  <form class="lock" id="lock" hidden>
+    <p>This page is for the team. Enter the password to see the queue.</p>
+    <label class="field" for="pw">Password</label>
+    <input type="password" id="pw" autocomplete="current-password" required>
+    <div class="row">
+      <label class="remember"><input type="checkbox" id="remember" checked> Remember on this device</label>
+      <button type="submit" id="unlock">Unlock</button>
+    </div>
+    <p class="err" id="pw-err" role="alert"></p>
+  </form>
+
+  <div id="content">
   <section aria-labelledby="h-nodes">
     <h2 id="h-nodes" class="visually-hidden" style="margin-top:0">Nodes</h2>
     <div class="trays" id="trays"></div>
@@ -168,6 +192,7 @@ ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--
     and check your place with <code>gitm-job ls</code>.
     Without a shell on the cluster, submit through the Slurm REST API with your Slurm token.
   </p>
+  </div>
 </div>
 
 <script>
@@ -179,7 +204,8 @@ const STALE_AFTER_S = 10 * 60;   // the pusher heartbeats every 5 min
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
-let data = null, lastSha = null, source = "", fetchError = null;
+let data = null, raw = null, lastSha = null, source = "", fetchError = null;
+let locked = false, lockMsg = "", typedAttempt = false;
 const openLogs = new Set();
 
 // ---------- fetching ----------
@@ -194,7 +220,7 @@ async function fetchStatus() {
                           { cache: "no-cache", headers: { Accept: "application/vnd.github+json" } });
     if (r.ok) {
       const sha = (await r.json()).object.sha;
-      if (sha === lastSha && data) return { json: data, via: "live" };
+      if (sha === lastSha && raw) return { json: raw, via: "live" };
       // By commit sha the file is immutable, so the CDN can't serve a stale copy.
       const f = await fetch(`https://raw.githubusercontent.com/${STATUS_REPO}/${sha}/status.json`);
       if (!f.ok) throw new Error(`status.json: HTTP ${f.status}`);
@@ -213,17 +239,79 @@ async function fetchStatus() {
   return { json: await f.json(), via: "cdn" };
 }
 
+// ---------- the password ----------
+// status.json is encrypted on the cluster (AES-256-GCM, key = PBKDF2-SHA256 of
+// the team password). The password never leaves this browser.
+const PW_KEY = "gpu-page-password";
+const store = {
+  get() { for (const st of [sessionStorage, localStorage]) { try { const v = st.getItem(PW_KEY); if (v) return v; } catch (e) {} } return null; },
+  set(pw, remember) { this.clear(); try { (remember ? localStorage : sessionStorage).setItem(PW_KEY, pw); } catch (e) {} },
+  clear() { for (const st of [sessionStorage, localStorage]) { try { st.removeItem(PW_KEY); } catch (e) {} } },
+};
+let password = store.get();
+const keyCache = new Map();
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+async function keyFor(pw, saltB64, iter) {
+  const id = `${saltB64}:${iter}:${pw}`;
+  if (!keyCache.has(id)) {
+    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+    keyCache.clear();
+    keyCache.set(id, await crypto.subtle.deriveKey(
+      { name: "PBKDF2", hash: "SHA-256", salt: b64(saltB64), iterations: iter },
+      base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]));
+  }
+  return keyCache.get(id);
+}
+
+async function decryptStatus(sealed, pw) {
+  const key = await keyFor(pw, sealed.salt, sealed.iter);
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(sealed.iv) }, key, b64(sealed.data));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
 async function refresh() {
   try {
     const { json, via } = await fetchStatus();
-    data = json; source = via; fetchError = null;
+    raw = json; source = via; fetchError = null;
   } catch (e) {
     fetchError = e.message === "not-found"
       ? "No status published yet. The status pusher on gitmachine-2 hasn't pushed to GitHub."
       : "Couldn't reach GitHub to load the status. Retrying every minute.";
   }
+  await unseal();
   render();
 }
+
+async function unseal() {
+  if (!raw) return;
+  if (!raw.sealed) { data = raw; locked = false; return; }
+  if (!password) { locked = true; data = null; return; }
+  try {
+    data = await decryptStatus(raw, password);
+    locked = false; lockMsg = "";
+  } catch (e) {
+    // GCM authentication failed: wrong or outdated password.
+    data = null; locked = true; password = null; store.clear();
+    lockMsg = typedAttempt ? "That password didn't work." : "The password was changed. Enter the new one.";
+  }
+}
+
+$("lock").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = $("unlock"), pw = $("pw").value;
+  if (!pw) return;
+  btn.disabled = true; btn.textContent = "Unlocking…"; $("pw-err").textContent = "";
+  password = pw; typedAttempt = true;
+  await unseal();
+  typedAttempt = false;
+  btn.disabled = false; btn.textContent = "Unlock";
+  if (!locked) { store.set(pw, $("remember").checked); $("pw").value = ""; }
+  render();
+  if (locked) $("pw").focus();
+});
+
+function lockPage() { password = null; data = null; store.clear(); locked = true; lockMsg = ""; render(); }
 
 // ---------- formatting ----------
 const ts = (s) => (s ? Date.parse(s) : null);
@@ -242,7 +330,12 @@ const gib = (mib) => (mib == null ? "–" : `${Math.round(mib / 1024)}`);
 
 // ---------- rendering ----------
 function render() {
+  const showLock = locked && !!raw;
+  $("lock").hidden = !showLock;
+  $("content").hidden = showLock;
+  if (showLock) { $("pw-err").textContent = lockMsg; if (document.activeElement === document.body) $("pw").focus(); }
   renderSync();
+  if (showLock) return;
   if (!data) {
     $("trays").innerHTML = `<p class="nogpu">${esc(fetchError || "Loading…")}</p>`;
     return;
@@ -351,12 +444,17 @@ function recentRow(j, i) {
 function renderSync() {
   const el = $("sync"), txt = $("sync-text"), banner = $("banner");
   el.className = "sync"; banner.innerHTML = "";
+  if (locked && raw) { txt.textContent = "Locked"; $("lock-btn")?.remove(); return; }
   if (!data) {
     if (fetchError) { el.classList.add("down"); txt.textContent = "No data"; }
     return;
   }
   const age = (Date.now() - ts(data.updated)) / 1000;
   txt.textContent = `Updated ${dur(age)} ago${source === "cdn" ? " (delayed copy)" : ""}`;
+  if (raw && raw.sealed && !$("lock-btn")) {
+    const b = document.createElement("button"); b.id = "lock-btn"; b.type = "button"; b.textContent = "Lock";
+    b.addEventListener("click", lockPage); el.append(b);
+  }
   if (age > STALE_AFTER_S) {
     el.classList.add("down");
     banner.innerHTML = `<div class="banner bad">The cluster hasn't reported since ${esc(new Date(ts(data.updated)).toLocaleString())}. What you see may be out of date: check <code>systemctl status gitm-status</code> on gitmachine-2.</div>`;
