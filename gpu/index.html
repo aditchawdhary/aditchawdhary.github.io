@@ -12,7 +12,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 /* Status data comes from the `status` branch of STATUS_REPO, written by
-   `gitm-job _push-status` on the cluster's control VM. */
+   `gitm-job _push-status` on the Slurm controller. */
 :root {
   --paper: #eef1f4;
   --panel: #f9fafb;
@@ -123,6 +123,7 @@ ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--
 .st { font-weight: 600; white-space: nowrap; }
 .st.succeeded { color: var(--good); }
 .st.failed { color: var(--bad); }
+.st.cancelled { color: var(--steel); }
 .recent .why { color: var(--steel); font-size: .85rem; }
 .recent tr.expand td { padding-top: 0; }
 .recent button.more { font: inherit; font-size: .82rem; color: var(--steel); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
@@ -162,8 +163,8 @@ ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--
   </section>
 
   <p class="howto">
-    Each job gets all 8 GPUs of one node and starts on whichever node frees up first.
-    To queue one, SSH to the control VM and run
+    Each job gets all 8 GPUs of one node, runs in its own container, and starts on whichever node frees up first.
+    To queue one, SSH to gitmachine-2 and run
     <code>gitm-job submit --name my-run --model org/model</code>.
     Check your place with <code>gitm-job ls</code>.
   </p>
@@ -218,7 +219,7 @@ async function refresh() {
     data = json; source = via; fetchError = null;
   } catch (e) {
     fetchError = e.message === "not-found"
-      ? "No status published yet. The status pusher on the control VM hasn't pushed to GitHub."
+      ? "No status published yet. The status pusher on gitmachine-2 hasn't pushed to GitHub."
       : "Couldn't reach GitHub to load the status. Retrying every minute.";
   }
   render();
@@ -249,7 +250,7 @@ function render() {
   const jobs = new Map(data.running.map((j) => [j.name, j]));
   $("trays").innerHTML = data.nodes.length
     ? data.nodes.map((n) => tray(n, jobs.get(n.job))).join("")
-    : `<p class="nogpu">No GPU nodes have joined the cluster yet.</p>`;
+    : `<p class="nogpu">No GPU nodes in the Slurm partition yet.</p>`;
   // keep open logs open across refreshes
   document.querySelectorAll("details.log").forEach((d) => {
     if (openLogs.has(d.dataset.job)) d.open = true;
@@ -295,7 +296,7 @@ function tray(n, job) {
            <div class="meta"><span data-elapsed="${esc(job.started)}">${dur(elapsed)}</span> of ${dur(max)} limit</div>`}
     </div>`;
   } else {
-    occ = `<div class="occupant idle"><div class="who">${n.ready ? "No job running" : "Node is not reporting to the cluster"}</div></div>`;
+    occ = `<div class="occupant idle"><div class="who">${n.ready ? "No job running" : "Node is down or not responding to Slurm"}</div></div>`;
   }
   const gpus = n.gpus && n.gpus.length
     ? `<div class="gpus" role="list" aria-label="GPU utilization">${n.gpus.map(gpuCell).join("")}</div>
@@ -333,7 +334,7 @@ function queueRow(j) {
 
 function recentRow(j, i) {
   const ran = ts(j.started) && ts(j.finished) ? (ts(j.finished) - ts(j.started)) / 1000 : null;
-  const label = j.state === "succeeded" ? "Done" : "Failed";
+  const label = { succeeded: "Done", cancelled: "Cancelled" }[j.state] || "Failed";
   const id = `out-${i}`;
   const more = j.log_tail && j.log_tail.length
     ? `<div><button class="more" aria-expanded="false" aria-controls="${id}">Show output</button></div>` : "";
@@ -358,7 +359,7 @@ function renderSync() {
   txt.textContent = `Updated ${dur(age)} ago${source === "cdn" ? " (delayed copy)" : ""}`;
   if (age > STALE_AFTER_S) {
     el.classList.add("down");
-    banner.innerHTML = `<div class="banner bad">The cluster hasn't reported since ${esc(new Date(ts(data.updated)).toLocaleString())}. What you see may be out of date: check <code>systemctl status gitm-status</code> on the control VM.</div>`;
+    banner.innerHTML = `<div class="banner bad">The cluster hasn't reported since ${esc(new Date(ts(data.updated)).toLocaleString())}. What you see may be out of date: check <code>systemctl status gitm-status</code> on gitmachine-2.</div>`;
   } else if (source === "cdn" || fetchError) {
     el.classList.add("stale");
     if (source === "cdn") banner.innerHTML = `<div class="banner">Your network has used up GitHub's hourly allowance, so this page is reading a copy that can lag by a few minutes. It switches back on its own.</div>`;
