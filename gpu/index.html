@@ -138,6 +138,18 @@ ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--
 .st.cancelled { color: var(--steel); }
 .recent .why { color: var(--steel); font-size: .85rem; }
 .recent tr.expand td { padding-top: 0; }
+.res { display: grid; gap: 14px; padding: 4px 0 14px; }
+.res .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px 18px; }
+.res .m b { display: block; font-size: 1.15rem; font-weight: 700; font-stretch: 110%; }
+.res .m span { color: var(--steel); font-size: .8rem; }
+.res h4 { margin: 0 0 6px; font-size: .85rem; font-weight: 600; color: var(--steel); }
+.res .kbar { display: flex; height: 14px; border-radius: 3px; overflow: hidden; background: var(--cell); }
+.res .kbar i { display: block; height: 100%; }
+.res .klegend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .8rem; color: var(--steel); margin-top: 6px; }
+.res .klegend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.res .files { font-size: .8rem; color: var(--steel); }
+.res .files code { font-family: "IBM Plex Mono", ui-monospace, monospace; color: var(--ink); }
+.res .warn { font-size: .85rem; color: var(--wait); border-left: 3px solid var(--wait); padding-left: 10px; }
 .recent button.more { font: inherit; font-size: .82rem; color: var(--steel); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
 @media (max-width: 640px) {
   h1 { font-size: 2.1rem; }
@@ -206,7 +218,7 @@ const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
 let data = null, raw = null, lastSha = null, source = "", fetchError = null;
 let locked = false, lockMsg = "", typedAttempt = false;
-const openLogs = new Set();
+const openLogs = new Set(), openRows = new Set();
 
 // ---------- fetching ----------
 async function fetchStatus() {
@@ -364,8 +376,13 @@ function render() {
     b.addEventListener("click", () => {
       const row = document.getElementById(b.getAttribute("aria-controls"));
       const open = row.hidden; row.hidden = !open; b.setAttribute("aria-expanded", String(open));
-      b.textContent = open ? "Hide output" : "Show output";
+      b.textContent = `${open ? "Hide" : "Show"} ${b.dataset.what}`;
+      open ? openRows.add(row.dataset.job) : openRows.delete(row.dataset.job);
     }));
+  document.querySelectorAll("tr.expand:not([hidden])").forEach((row) => {
+    const b = document.querySelector(`button.more[aria-controls="${row.id}"]`);
+    if (b) { b.setAttribute("aria-expanded", "true"); b.textContent = `Hide ${b.dataset.what}`; }
+  });
 }
 
 function freeNodes() {
@@ -425,12 +442,52 @@ function queueRow(j) {
   </li>`;
 }
 
+const KCOL = { gemm: "var(--load)", attention: "#4a7fb5", comm: "var(--wait)", moe: "#7a5ea8",
+               elementwise: "#6b8f3a", norm: "#b05c7a", memory: "#8a7a5c", other: "var(--steel)" };
+const ms = (s) => (s == null ? "–" : s < 1 ? `${(s * 1000).toFixed(s < 0.01 ? 1 : 0)} ms` : `${s.toFixed(2)} s`);
+const pct = (x) => (x == null ? "–" : `${Math.round(x * 100)}%`);
+const bytes = (n) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : n > 1e3 ? `${Math.round(n / 1e3)} kB` : `${n} B`);
+
+function resultBlock(r) {
+  if (!r) return "";
+  const parts = [];
+  const sv = r.serving;
+  if (sv) {
+    const m = (v, l) => `<div class="m"><b>${v}</b><span>${l}</span></div>`;
+    parts.push(`<div class="metrics">
+      ${m(`${sv.n_requests ?? "–"}${sv.n_failed_requests ? ` <span style="color:var(--bad)">(${sv.n_failed_requests} failed)</span>` : ""}`, "requests in window")}
+      ${m(ms(sv.ttft_p50_s), "time to first token, p50")}
+      ${m(ms(sv.ttft_p95_s), "time to first token, p95")}
+      ${m(ms(sv.tpot_p50_s), "time per output token, p50")}
+      ${m(sv.goodput_rps == null ? "–" : `${sv.goodput_rps.toFixed(1)}/s`, "goodput (requests meeting SLO)")}
+      ${r.kernels ? m(pct(r.kernels.gpu_active_share), "GPU busy during window") : ""}
+    </div>`);
+  }
+  const k = r.kernels;
+  if (k && k.buckets && k.buckets.length) {
+    const col = (b) => KCOL[b] || "var(--steel)";
+    parts.push(`<div><h4>Where GPU kernel time went (${(k.n_kernels ?? 0).toLocaleString()} kernels, ${k.n_devices ?? "?"} GPUs)</h4>
+      <div class="kbar" role="img" aria-label="${esc(k.buckets.map(([b, x]) => `${b} ${pct(x)}`).join(", "))}">
+        ${k.buckets.map(([b, x]) => `<i style="width:${(x * 100).toFixed(2)}%;background:${col(b)}" title="${esc(b)} ${pct(x)}"></i>`).join("")}
+      </div>
+      <div class="klegend">${k.buckets.map(([b, x]) => `<span><i style="background:${col(b)}"></i>${esc(b)} ${pct(x)}</span>`).join("")}</div></div>`);
+  }
+  (r.warnings || []).forEach((w) => parts.push(`<div class="warn">${esc(w)}</div>`));
+  if (r.files && r.files.length) {
+    parts.push(`<div class="files">Files: ${r.files.map(([n, b]) => `<code>${esc(n)}</code> ${bytes(b)}`).join(", ")}</div>`);
+  }
+  return parts.length ? `<div class="res">${parts.join("")}</div>` : "";
+}
+
 function recentRow(j, i) {
   const ran = ts(j.started) && ts(j.finished) ? (ts(j.finished) - ts(j.started)) / 1000 : null;
   const label = { succeeded: "Done", cancelled: "Cancelled" }[j.state] || "Failed";
   const id = `out-${i}`;
-  const more = j.log_tail && j.log_tail.length
-    ? `<div><button class="more" aria-expanded="false" aria-controls="${id}">Show output</button></div>` : "";
+  const res = resultBlock(j.result);
+  const log = j.log_tail && j.log_tail.length ? `<pre>${esc(j.log_tail.join("\n"))}</pre>` : "";
+  const what = res && log ? "results and output" : res ? "results" : "output";
+  const more = res || log
+    ? `<div><button class="more" data-what="${what}" aria-expanded="false" aria-controls="${id}">Show ${what}</button></div>` : "";
   return `<tr>
       <td class="name">${esc(j.display_name)}<div class="why">${esc(j.owner)}</div></td>
       <td><span class="st ${j.state}">${label}</span>${j.detail ? `<div class="why">${esc(j.detail)}</div>` : ""}${more}</td>
@@ -438,7 +495,7 @@ function recentRow(j, i) {
       <td class="c-node">${esc(j.node || "–")}</td>
       <td>${dur(ran)}</td>
       <td>${ago(j.finished)} ago</td>
-    </tr>${more ? `<tr class="expand" id="${id}" hidden><td colspan="6"><pre>${esc(j.log_tail.join("\n"))}</pre></td></tr>` : ""}`;
+    </tr>${more ? `<tr class="expand" id="${id}" ${openRows.has(j.name) ? "" : "hidden"} data-job="${esc(j.name)}"><td colspan="6">${res}${log}</td></tr>` : ""}`;
 }
 
 function renderSync() {
