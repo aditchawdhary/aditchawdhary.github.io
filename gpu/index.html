@@ -164,9 +164,9 @@ ol.queue { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--
 
   <p class="howto">
     Each job gets all 8 GPUs of one node, runs in its own container, and starts on whichever node frees up first.
-    To queue one, SSH to gitmachine-2 and run
-    <code>gitm-job submit --name my-run --model org/model</code>.
-    Check your place with <code>gitm-job ls</code>.
+    To queue one from a cluster node, run <code>gitm-job submit --name my-run --model org/model</code>
+    and check your place with <code>gitm-job ls</code>.
+    Without a shell on the cluster, submit through the Slurm REST API with your Slurm token.
   </p>
 </div>
 
