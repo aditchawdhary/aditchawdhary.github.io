@@ -297,10 +297,16 @@ async function refresh() {
 
 async function unseal() {
   if (!raw) return;
-  if (!raw.sealed) { data = raw; locked = false; return; }
+  if (!raw.sealed) {
+    // Anything without the expected shape is treated as "no data", never rendered.
+    data = Array.isArray(raw.nodes) && raw.updated ? raw : null; locked = false;
+    if (!data) fetchError = "The status file isn't in a format this page understands. Reload the page (it may be an old copy).";
+    return;
+  }
   if (!password) { locked = true; data = null; return; }
   try {
     data = await decryptStatus(raw, password);
+    if (!Array.isArray(data.nodes) || !data.updated) throw new Error("bad shape");
     locked = false; lockMsg = "";
   } catch (e) {
     // GCM authentication failed: wrong or outdated password.
